@@ -19,7 +19,7 @@ car_norms.py v3.1 — сверка логов FAP (MED17.4.2, EP6 THP) с нор
 ЧТО НОВОГО В v3.1 (правки после ревизии):
  - детонация: превышения считаются только при работающем впрыске (Inj.1Time > 0.5 мс)
    и ненулевом пороге — пусковые всплески и отсечка топлива не портят счёт;
- - недобор масла: только прогретое масло (>=60 C), обороты >1000 и задание >800 мбар;
+ - недобор масла: только прогретое масло (>=60 C), обороты >700 и задание >800 мбар;
  - ТНВД: статистика только по движению с реальным впрыском (Inj.1Time > 2 мс),
    отсечка топлива (впрыск ~0 при качении) исключена из медиан и долей;
  - впрыск: единичные пики >15 мс отбрасываются как глитчи записи;
@@ -181,13 +181,13 @@ def analyze(path):
             up(2000, 1200, m), 'мин 0.8-1.0 бар; THP обычно 2.7-2.9', 'EM+CS')
     cand = [i for i in range(len(rows))
             if C['OilTemp'][i] is not None and C['OilTemp'][i] >= 60
-            and R[i] is not None and R[i] > 1000
+            and R[i] is not None and R[i] > 700
             and C['OilPressInstr'][i] is not None and C['OilPressInstr'][i] > 800
             and C['OilPress'][i] is not None]
     deficits = [C['OilPress'][i] - C['OilPressInstr'][i] for i in cand]
     bad = [d for d in deficits if d < -300]
     if deficits:
-        out('недобор масла (warm, об>1000, зад>800)',
+        out('недобор масла (warm, об>700, зад>800)',
             '{} точек, медиана {:+.0f}'.format(len(bad), med(bad) if bad else 0.0), ' мбар',
             dn(50, 300, len(bad)),
             'расхождение факт/задание в нагрузке', 'UD')
@@ -248,6 +248,9 @@ def analyze(path):
     if co:
         out('ОЖ макс', '{:.0f}'.format(max(co)), ' C',
             dn(95, 105, max(co)), 'норма 85-95', 'PR')
+    gl = [INJ[i] for i in range(len(rows)) if INJ[i] is not None and INJ[i] > 15]
+    if gl:
+        print('  глитчей впрыска >15 мс отброшено из статистики: {}'.format(len(gl)))
     inj = [INJ[i] for i in range(len(rows)) if inj_on(i) and INJ[i] <= 15]
     if inj:
         out('впрыск макс (без глитчей)', '{:.1f}'.format(max(inj)), ' мс',
