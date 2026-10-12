@@ -10,8 +10,8 @@ car_kb.py — база знаний по машине. Данные: car_kb.json
   python car_kb.py sync [файлы отчётов]      — влить метрики из отчётов logscan
   python car_kb.py brief                     — брифинг для вставки в новый диалог
   python car_kb.py backup                    — копия car_kb.json с датой
-  python car_kb.py del "категория" "фрагмент" — удалить записи, содержащие фрагмент
-  python car_kb.py list [категория]          — список записей с номерами
+  python car_kb.py del "категория" "текст"   — удалить записи, содержащие текст
+  python car_kb.py list [категория]          — пронумерованный список записей
 """
 
 import glob
@@ -29,6 +29,7 @@ CATS = ("авто", "эбу", "сканер", "диагностика", "рем�
 def load():
     if not os.path.exists(KB_FILE):
         print("(car_kb.json не найден — создаю пустую базу)")
+        save({})
         return {}
     with open(KB_FILE, "r", encoding="utf-8") as f:
         try:
@@ -113,16 +114,24 @@ def cmd_sync(paths):
                 mm = re.search(pat, block)
                 return cast(mm.group(1)) if mm else None
 
-            v = rx(r"MAP на ХХ \(прогретый\).*медиана (\d+)", int)
+            v = rx(r"MAP на ХХ $прогретый$.*медиана (\d+)", int)
             if v is not None: metrics["MAP_хх_прогретый_мбар"] = v
-            v = rx(r"MAP на ХХ \(холодный\).*медиана (\d+)", int)
+            v = rx(r"MAP на ХХ $холодный$.*медиана (\d+)", int)
             if v is not None: metrics["MAP_хх_холодный_мбар"] = v
             v = rx(r"противофаза (\d+)%", int)
             if v is not None: metrics["противофаза_лямбд_pct"] = v
             v = rx(r"Нижняя лямбда на ХХ: медиана (\d+)", int)
             if v is not None: metrics["нижняя_лямбда_хх_мв"] = v
-            v = rx(r"Флаг Errors: 1 в \d+ из \d+ строк \((\d+)%\)", int)
+            v = rx(r"Флаг Errors: 1 в \d+ из \d+ строк $(\d+)%$", int)
             if v is not None: metrics["errors_flag_pct"] = v
+            v = rx(r"прогретом ХХ $ОЖ>=70$: медиана (\d+)", int)
+            if v is not None: metrics["лямбда_прогретый_хх_мв"] = v
+            v = rx(r"прогретом ХХ.*ниже 200 мВ в (\d+)%", int)
+            if v is not None: metrics["лямбда_прогретый_доля_200_pct"] = v
+            v = rx(r"ТНВД: рампа [\d.…]+ бар $медиана (\d+)$", int)
+            if v is not None: metrics["тнвд_рампа_медиана"] = v
+            v = rx(r"Регулятор ТНВД: [\d.…]+% $медиана (\d+)%$", int)
+            if v is not None: metrics["тнвд_регулятор_медиана"] = v
             v = rx(r"Детонация: макс сенсор ([\d.]+)", float)
             if v is not None: metrics["детонация_макс"] = v
             v = rx(r"превышений порога: (\d+)", int)
@@ -149,9 +158,10 @@ def cmd_brief():
     kb = load()
     lines = ["=== БРИФИНГ ПО МАШИНЕ (вставить первым сообщением в новый диалог) ==="]
     for cat in [c for c in CATS if c in kb] + [c for c in kb if c not in CATS and c != "метрики"]:
-        lines.append("-- {}: --".format(cat))
-        for v in kb[cat]:
-            lines.append("  " + str(v))
+        if cat in kb:
+            lines.append("-- {}: --".format(cat))
+            for v in kb[cat]:
+                lines.append("  " + str(v))
     if "метрики" in kb:
         lines.append("-- метрики по файлам: --")
         lines.extend(fmt_metrics(kb["метрики"]))
@@ -190,14 +200,13 @@ def cmd_list(cat=None):
     for c in sorted(kb):
         if cat and cat != c:
             continue
-        if c == "метрики" and isinstance(kb[c], dict):
-            print("[метрики] ({})".format(len(kb[c])))
-            for i, fname in enumerate(sorted(kb[c])):
-                print("  {}. {} -> {} полей".format(i + 1, fname, len(kb[c][fname]) - 1))
-            continue
         print("[{}] ({})".format(c, len(kb[c])))
-        for i, v in enumerate(kb[c]):
-            print("  {}. {}".format(i + 1, v[:150]))
+        if c == "метрики" and isinstance(kb[c], dict):
+            for fname, m in kb[c].items():
+                print("  - {} ({} полей)".format(fname, len(m)))
+        else:
+            for i, v in enumerate(kb[c]):
+                print("  {}. {}".format(i + 1, v[:150]))
 
 
 def main():
