@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# car_merge.py v2 — склейка повторных выгрузок суточного лога FAP в один канонический файл.
+# car_merge.py v2.1 — склейка повторных выгрузок суточного лога FAP в один канонический файл.
 # Запуск: python car_merge.py
 # Что делает:
 #   1. Ищет в текущей папке файлы MED17_4_2_YYYYMMDD*.csv (все выгрузки одного дня).
@@ -15,7 +15,9 @@
 #   - предупреждение о РАЗНЫХ ШАПКАХ у выгрузок (несовместимые строки не смешиваются молча);
 #   - подсчёт коллизий времени (разные данные на одну метку — как у глитчей ELM);
 #   - подсчёт строк с числом колонок, отличным от шапки;
-#   - первая строка файла-продолжения (-1) не теряется, если это данные, а не шапка.
+#   - первая строка файла-продолжения (-1) не теряется, если это данные, а не шапка:
+#     строки данных до первой шапки буферизуются и подшиваются после её обнаружения;
+#     если шапки нет ни в одном файле — громкое предупреждение.
 
 import os, glob, re, shutil
 
@@ -117,6 +119,37 @@ def main():
         n_in = 0
         collisions = 0
         bad_cols = 0
+        pending = []   # строки данных, встреченные до первой шапки
+
+        def set_header(line):
+            nonlocal delim, header, tcol, tname, dcol, ncols
+            delim = detect_delimiter(line)
+            header = line
+            tcol, tname = time_col_index(header, delim)
+            dcol = date_col_index(header, delim)
+            ncols = len(cells(header, delim))
+
+        def add_data(line):
+            nonlocal n_in, collisions, bad_cols
+            if line in seen:
+                return
+            seen.add(line)
+            parts = line.split(delim)
+            if len(parts) != ncols:
+                bad_cols += 1
+            sec = to_seconds(parts[tcol]) if (tcol is not None and tcol < len(parts)) else None
+            dnum = to_daynum(parts[dcol]) if (dcol is not None and dcol < len(parts)) else None
+            if sec is not None and dnum is not None:
+                tkey = (dnum, sec)
+                if tkey in time_seen and time_seen[tkey] != line:
+                    collisions += 1
+                time_seen[tkey] = line
+            rows.append((dnum or ZERO, sec if sec is not None else 0.0, len(rows), line))
+
+        def flush_pending():
+            for pl in pending:
+                add_data(pl)
+            pending.clear()
 
         for f in flist:
             with open(f, "r", encoding="utf-8-sig", errors="replace") as fh:
@@ -125,11 +158,12 @@ def main():
                     if not line.strip():
                         continue
                     if header is None:
-                        delim = detect_delimiter(line)
-                        header = line
-                        tcol, tname = time_col_index(header, delim)
-                        dcol = date_col_index(header, delim)
-                        ncols = len(cells(header, delim))
+                        if is_header(line, detect_delimiter(line)):
+                            set_header(line)
+                            flush_pending()
+                        else:
+                            pending.append(line)   # данные до шапки — копим
+                            n_in += 1
                         continue
                     if is_header(line, delim):
                         if cells(line, delim) != cells(header, delim):
@@ -137,20 +171,13 @@ def main():
                                   "соответствовать каноническому набору колонок".format(f))
                         continue
                     n_in += 1
-                    if line in seen:
-                        continue
-                    seen.add(line)
-                    parts = line.split(delim)
-                    if len(parts) != ncols:
-                        bad_cols += 1
-                    sec = to_seconds(parts[tcol]) if (tcol is not None and tcol < len(parts)) else None
-                    dnum = to_daynum(parts[dcol]) if (dcol is not None and dcol < len(parts)) else None
-                    if sec is not None and dnum is not None:
-                        tkey = (dnum, sec)
-                        if tkey in time_seen and time_seen[tkey] != line:
-                            collisions += 1
-                        time_seen[tkey] = line
-                    rows.append((dnum or ZERO, sec if sec is not None else 0.0, len(rows), line))
+                    add_data(line)
+
+        if header is None and pending:
+            print("[!!] {}: шапки нет ни в одном файле — первая строка данных "
+                  "принята за шапку, проверьте файл вручную".format(day))
+            set_header(pending[0])
+            flush_pending()
 
         # сортировка по дате и времени (устойчивая: без даты/времени — по порядку следования)
         rows.sort(key=lambda r: (r[0], r[1], r[2]))
