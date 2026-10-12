@@ -1,0 +1,7 @@
+raw/
+__pycache__/
+.idea/
+*.csv
+отчёт*.txt
+car_kb.broken.json
+MED17_*
