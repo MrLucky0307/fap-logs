@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-logscan.py v2.1 — анализ CSV-логов FAP (MED17.4.2).
+logscan.py v2.2 — анализ CSV-логов FAP (MED17.4.2).
 
 Запуск:
   python logscan.py                      — все MED17*.csv из текущей папки
@@ -20,6 +20,16 @@ logscan.py v2.1 — анализ CSV-логов FAP (MED17.4.2).
   - плотность записи: медианный шаг и максимальная пауза;
   - пустые ячейки НЕ переносятся между строками (плохой ELM: каждая строка сама по себе);
   - десятичный разделитель: и точка, и запятая.
+
+Что нового в v2.2 относительно v2.1:
+  - MAP на ХХ: точки idle-up кондиционера (дроссель >2.5%) отсеиваются и
+    показываются отдельной строкой — MAP больше не задран кондиционером;
+  - AirCPress — это давление хладагента в БАРАХ (было: «мбар» и мёртвый порог 500);
+  - FuelPress / FuelPressInstr / FuelPressReg разведены: рампа, задание,
+    регулятор ТНВД — все три выведены в отчёт (раньше затирали друг друга);
+  - даты формата 2026.10.12 парсятся — многодневная сортировка работает;
+  - время через полночь печатается как "+1д ЧЧ:ММ:СС";
+  - нижняя лямбда отдельно на прогретом ХХ (ОЖ >= 70 °C).
 """
 
 import glob
@@ -62,7 +72,7 @@ def fnum(s):
 
 def parse_date(s):
     s = str(s).strip().strip('"')
-    for fmt in ("%d-%m-%y", "%d.%m.%y", "%d/%m/%y", "%Y-%m-%d",
+    for fmt in ("%Y.%m.%d", "%d-%m-%y", "%d.%m.%y", "%d/%m/%y", "%Y-%m-%d",
                 "%d-%m-%Y", "%m-%d-%y"):
         try:
             return datetime.strptime(s, fmt).date()
@@ -84,7 +94,10 @@ def parse_time(s):
 
 def tstr(t):
     t = int(t)
-    return "{:02d}:{:02d}:{:02d}".format(t // 3600, t % 3600 // 60, t % 60)
+    days = t // 86400
+    t %= 86400
+    s = "{:02d}:{:02d}:{:02d}".format(t // 3600, t % 3600 // 60, t % 60)
+    return ("+{}д ".format(days) + s) if days else s
 
 
 def med(vals):
@@ -117,8 +130,12 @@ def channel_class(h):
         return "oil_temp"
     if h == "atmosphpress":
         return "atm"
-    if h.startswith("fuelpress"):
+    if h == "fuelpress":
         return "fuel_press"
+    if h == "fuelpressinstr":
+        return "fuel_press_instr"
+    if h == "fuelpressreg":
+        return "fuel_press_reg"
     if h == "alternatortemp":
         return "skip"
     if h == "alternatorcurrent":
@@ -303,14 +320,21 @@ def analyze(points, name, tag):
 
     # --- ХХ и MAP
     idle = []
+    idle_ac = 0
     for t, d in points:
         rpm = d.get("rpm")
         sp = d.get("speed")
         if rpm is None or sp is None:
             continue
         pd = d.get("pedal")
+        th = d.get("throttle")
         if sp == 0 and 650 <= rpm <= 1050 and (pd is None or pd < 5):
+            if th is not None and th > 2.5:
+                idle_ac += 1  # idle-up кондиционера — не ХХ для MAP
+                continue
             idle.append((t, d))
+    if idle_ac:
+        out.append("ХХ: отсеяно {} точек idle-up кондиционера (дроссель >2.5%)".format(idle_ac))
 
     warm = [(t, d) for t, d in idle if (d.get("coolant") or 0) >= 60]
     cold = [(t, d) for t, d in idle if (d.get("coolant") or 0) < 60]
@@ -343,6 +367,13 @@ def analyze(points, name, tag):
         lean_dn = sum(1 for v in dn_st if v < 200)
         out.append("Нижняя лямбда на ХХ: медиана {:.0f} мВ, ниже 200 мВ в {:.0f}% точек".format(
             med(dn_st), 100.0 * lean_dn / len(dn_st)))
+        wsel = [d for _, d in o2_idle if (d.get("coolant") or 0) >= 70]
+        if wsel:
+            dn_w = [d["o2_down"] * scale for d in wsel]
+            lean_w = sum(1 for v in dn_w if v < 200)
+            out.append("Нижняя лямбда на прогретом ХХ (ОЖ>=70): медиана {:.0f} мВ, "
+                       "ниже 200 мВ в {:.0f}% точек ({} из {})".format(
+                med(dn_w), 100.0 * lean_w / len(dn_w), lean_w, len(dn_w)))
 
     # --- коррекции смеси на ХХ
     upc = [d["up_corr"] for _, d in idle if d.get("up_corr") is not None]
@@ -495,13 +526,28 @@ def analyze(points, name, tag):
                    "(медиана {:+.0f}, худший {:+.0f} @ {})".format(
             len(mism), med(diffs), min(diffs), tstr(tmax)))
 
+    # --- ТНВД: рампа / задание / регулятор
+    fp = [v for _, v in col("fuel_press")]
+    fpi = [v for _, v in col("fuel_press_instr")]
+    fpr = [v for _, v in col("fuel_press_reg")]
+    if fp:
+        line = "ТНВД: рампа {:.0f}…{:.0f} бар (медиана {:.0f})".format(
+            min(fp), max(fp), med(fp))
+        if fpi:
+            line += " | задание {:.0f}…{:.0f} бар".format(min(fpi), max(fpi))
+        out.append(line)
+    if fpr:
+        out.append("Регулятор ТНВД: {:.0f}…{:.0f}% (медиана {:.0f}%)".format(
+            min(fpr), max(fpr), med(fpr)))
+
     # --- кондиционер
     acp = [v for _, v in col("ac_press")]
     if acp:
-        on = [x for x in acp if x > 500]
+        on = [x for x in acp if x > 5.0]
         extra = (", компрессор включен в {} из {} точек".format(len(on), len(acp))
                  if on else "")
-        out.append("Кондиционер: макс {:.0f} мбар{}".format(max(acp), extra))
+        out.append("Кондиционер: давление хладагента {:.1f}…{:.1f} бар{}".format(
+            min(acp), max(acp), extra))
 
     # --- атмосфера
     atm = [v for _, v in col("atm")]
@@ -540,7 +586,7 @@ def analyze(points, name, tag):
 # ------------------------------------------------------------- запуск
 
 def main():
-    args = sys.argv[1:]
+    args = [a for a in sys.argv[1:] if a != "--no-sync"]
     if args:
         files = args
     else:
