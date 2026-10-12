@@ -114,23 +114,23 @@ def cmd_sync(paths):
                 mm = re.search(pat, block)
                 return cast(mm.group(1)) if mm else None
 
-            v = rx(r"MAP на ХХ $прогретый$.*медиана (\d+)", int)
+            v = rx(r"MAP на ХХ [(]прогретый[)].*медиана (\d+)", int)
             if v is not None: metrics["MAP_хх_прогретый_мбар"] = v
-            v = rx(r"MAP на ХХ $холодный$.*медиана (\d+)", int)
+            v = rx(r"MAP на ХХ [(]холодный[)].*медиана (\d+)", int)
             if v is not None: metrics["MAP_хх_холодный_мбар"] = v
             v = rx(r"противофаза (\d+)%", int)
             if v is not None: metrics["противофаза_лямбд_pct"] = v
             v = rx(r"Нижняя лямбда на ХХ: медиана (\d+)", int)
             if v is not None: metrics["нижняя_лямбда_хх_мв"] = v
-            v = rx(r"Флаг Errors: 1 в \d+ из \d+ строк $(\d+)%$", int)
+            v = rx(r"Флаг Errors: 1 в \d+ из \d+ строк [(](\d+)%[)]", int)  # ← ПРАВИЛЬНОЕ
             if v is not None: metrics["errors_flag_pct"] = v
-            v = rx(r"прогретом ХХ $ОЖ>=70$: медиана (\d+)", int)
+            v = rx(r"прогретом ХХ [(]ОЖ>=70[)]: медиана (\d+)", int)
             if v is not None: metrics["лямбда_прогретый_хх_мв"] = v
             v = rx(r"прогретом ХХ.*ниже 200 мВ в (\d+)%", int)
             if v is not None: metrics["лямбда_прогретый_доля_200_pct"] = v
-            v = rx(r"ТНВД: рампа [\d.…]+ бар $медиана (\d+)$", int)
+            v = rx(r"ТНВД: рампа [\d.…]+ бар [(]медиана (\d+)[)]", int)
             if v is not None: metrics["тнвд_рампа_медиана"] = v
-            v = rx(r"Регулятор ТНВД: [\d.…]+% $медиана (\d+)%$", int)
+            v = rx(r"Регулятор ТНВД: [\d.…]+% [(]медиана (\d+)%[)]", int)
             if v is not None: metrics["тнвд_регулятор_медиана"] = v
             v = rx(r"Детонация: макс сенсор ([\d.]+)", float)
             if v is not None: metrics["детонация_макс"] = v
