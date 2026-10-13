@@ -1,172 +1,148 @@
-# ============================================================
-# car_core.py — шаг 1: загрузка, фильтры, режимы, поездки
-# Границы записи по портрету глушения (Speed=0, Gear=P, обрыв записи).
-# Паузы: SHUTDOWN рвёт поездку, LINK_LOSS — нет. Атрибуция интервалов
-# — к строке ДО паузы; OFF-карман для хвоста файла.
-# Запуск: python car_core.py [папка]  (по умолчанию '.')
-# ============================================================
-import os, sys, glob
-import pandas as pd
+# -*- coding: utf-8 -*-
+"""
+car_core.py v4 — ядро: загрузка, режимы, поездки.
+Запуск: python car_core.py [папка_с_логами]   (по умолчанию: папка скрипта)
+Логика границ записи (подтверждена владельцем):
+  - выключение зажигания обесточивает ELM => запись рвётся РЕЗКО;
+    последняя строка перед обрывом: Speed=0, Gear=P, обороты ~ХХ
+  - потеря связи на ходу: пауза при движении => поездка НЕ рвётся (LINK_LOSS)
+  - запинки ELM < 60 с => та же поездка
+  - пауза > 10 мин => SHUTDOWN безусловно
+  - охлаждение ОЖ > 10 C за паузу => SHUTDOWN даже без портрета
+"""
+import sys, os, glob
 import numpy as np
+import pandas as pd
 
+COLS_NUM = ["Inj.1Time","Inj.2Time","Inj.3Time","Inj.4Time","Cyl.1Adv","Cyl.2Adv","Cyl.3Adv","Cyl.4Adv",
+"Cyl.1AdvCorr","Cyl.2AdvCorr","Cyl.3AdvCorr","Cyl.4AdvCorr","UpO2Volt","DownO2Volt","UpO2Heat","DownO2Heat",
+"UpMixCorr","DownMixCorr","AirManifold","Coolant","OilTemp","AtmosphPress","FuelPressInstr","FuelPress",
+"FuelPressReg","AlternatorTemp","AlternatorCurrent","ECUtemp","Battery","FuelLevel","AirCPress","Speed",
+"ExternalTemp","Revs","TurboInstr","TurboPress","IntakeAirPressInstr","IntakeAirPress","OilPressInstr",
+"OilPress","AirFlowInstr","AirFlow","ThrottleAngleInstr","ThrottleAngle","InCamDephaserInstr","InCamDephaser",
+"InCamDephaserValve","TorqIgnAdvInstr","TorqIgnAdv","TorqAirFlowInstr","TorqAirFlow","TorqLost","TurboWastegate",
+"TurboBlowOff","AccelPedalPos","AlternatorCharge","OilPumpValve","KnockSensor","KnockSensorThr","Errors","BR"]
 
-def load_csv(path):
-    df = pd.read_csv(path, sep=';', encoding='utf-8', low_memory=False)
-    ts = pd.to_datetime(df['Date'] + ' ' + df['Time'], format='%Y.%m.%d %H:%M:%S.%f')
-    df.insert(0, 'ts', ts)
-    for c in df.columns:
-        if c in ('Date', 'Time', 'ts', 'Gear'): continue
-        df[c] = pd.to_numeric(df[c], errors='coerce')
-    return df.sort_values('ts').reset_index(drop=True)
+PAUSE_MERGE = 60      # запинки ELM короче — та же поездка
+PAUSE_FORCE = 600     # пауза дольше 10 мин — глушение безусловно
+COOL_DROP   = 10      # падение ОЖ за паузу, C — признак глушения
 
+def load(path):
+    df = pd.read_csv(path, sep=";", low_memory=False)
+    ts = pd.to_datetime(df["Date"].astype(str) + " " + df["Time"].astype(str),
+                        format="%Y.%m.%d %H:%M:%S.%f", errors="coerce")
+    bad = ts.isna()
+    if bad.any():
+        ts.loc[bad] = pd.to_datetime(df.loc[bad,"Date"].astype(str)+" "+df.loc[bad,"Time"].astype(str),
+                                     format="%Y.%m.%d %H:%M:%S", errors="coerce")
+    df["ts"] = ts
+    for c in COLS_NUM:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["Gear"] = df["Gear"].astype(str).str.strip()
+    return df.dropna(subset=["ts"]).sort_values("ts").reset_index(drop=True)
 
-def mark_glitches(df):
-    """Помечаем брак каналов, не удаляем: физика vs дефект записи."""
-    bad = pd.Series(False, index=df.index)
-    for c in df.columns:
-        if c.startswith('Inj.') and 'Time' in c:
-            bad |= ((df[c] > 15) & (df['Revs'] > 1000)).fillna(False)
-    bad |= (df['FuelPressReg'] > 110).fillna(False)
-    df['glitch'] = bad
+def classify(df):
+    mode = np.full(len(df), "OTHER", dtype=object)
+    spd  = df["Speed"].fillna(0).values
+    revs = df["Revs"].fillna(0).values
+    inj  = df[["Inj.1Time","Inj.2Time","Inj.3Time","Inj.4Time"]].fillna(0).values.max(axis=1)
+    heat = df["UpO2Heat"].fillna(0).values
+    o2   = df["UpO2Volt"].fillna(446).values
+    cool = df["Coolant"].fillna(0).values
+    thr  = df["ThrottleAngle"].fillna(0).values
+    ped  = df["AccelPedalPos"].fillna(0).values
+    # фантом: застрявший Revs при нулевом впрыске и холодном дефолте лямбд
+    phantom = (spd==0)&(inj==0)&(heat==0)&(revs>=300)&(revs<=1200)&(np.abs(o2-446)<30)
+    mode[phantom] = "OFF"
+    off = revs==0
+    mode[off & ~phantom] = "OFF"
+    run = ~(off|phantom)
+    crank = run & (revs>=200)&(revs<800)&(inj>10)&(spd==0)
+    mode[crank] = "CRANK"
+    warm = run & ~crank & (cool<60) & (spd==0)
+    mode[warm] = "WARMUP"
+    idle_cold = run & ~crank & ~warm & (cool>=60)&(cool<75)&(spd==0)&(thr<=8)&(revs>=650)&(revs<=1200)
+    mode[idle_cold] = "IDLE_COLD"
+    idle_warm = run & ~crank & ~warm & (cool>=75)&(spd==0)&(thr<=8)&(revs>=650)&(revs<=1200)
+    mode[idle_warm] = "IDLE_WARM"
+    mode[run & ~crank & (spd==0) & ~(warm|idle_cold|idle_warm)] = "OTHER"
+    mode[run & (ped>=85)] = "FULL_LOAD"
+    coast = run & (spd>0)&(thr<8)&(revs>1200)
+    mode[coast] = "COAST"
+    mode[run & (spd>0)&(thr<8)&(revs<=1200) & ~coast] = "DRIVE_LOW"
+    mode[run & (thr>=20)] = "LOAD"
+    mode[run & (thr>=8)&(thr<20) & (spd>0)] = "PART_LOAD"
+    df["mode"] = mode
+    df["stable"] = pd.Series(revs).diff().abs().values <= 30
     return df
 
+def segment(df):
+    gaps = np.diff(df["ts"].values)/np.timedelta64(1,"s")
+    cool = df["Coolant"].values
+    spd  = df["Speed"].fillna(0).values
+    gear = df["Gear"].values
+    tid  = np.zeros(len(df), dtype=int)
+    ends = {0: "EOF"}
+    t = 0
+    for i in range(len(df)-1):
+        tid[i] = t
+        g = gaps[i]
+        if g < PAUSE_MERGE:
+            continue
+        portret  = (spd[i]==0) and (gear[i] in ("P","N"))
+        cd = (not np.isnan(cool[i])) and (not np.isnan(cool[i+1])) and (cool[i]-cool[i+1] > COOL_DROP)
+        if g > PAUSE_FORCE or portret or cd:
+            ends[t] = "SHUTDOWN"; t += 1; ends[t] = "EOF"
+        else:
+            ends[t] = "LINK_LOSS"
+    tid[-1] = t
+    df["trip"] = tid
+    return df, ends
 
-def phantom_mask(df):
-    """Фантом в паузах: Revs~ХХ, Inj=0, лямбды на холодном дефолте
-    (446 мВ, нагрев 0). Не путать с честным fuel cut: там нагрев активен."""
-    ph = (df['Revs'].between(600, 900)) & (df['Inj.1Time'].fillna(0) == 0) \
-         & (df['UpO2Volt'] >= 440) & (df['UpO2Heat'].fillna(0) == 0) \
-         & (df['DownO2Volt'] >= 440) & (df['DownO2Heat'].fillna(0) == 0)
-    return ph.fillna(False)
+def report(df, ends, path):
+    t0, t1 = df["ts"].iloc[0], df["ts"].iloc[-1]
+    span = (t1-t0).total_seconds()/60
+    dtn = np.diff(df["ts"].values)/np.timedelta64(1,"s")
+    rec = dtn[dtn<PAUSE_MERGE].sum()/60
+    print(f"\n=== {os.path.basename(path)}: {t0} — {t1} ===")
+    print(f"Строк {len(df)}; записи {rec:.1f} мин, паузы {span-rec:.1f} мин; баланс {span:.1f} мин")
+    n_loss = sum(1 for v in ends.values() if v=="LINK_LOSS")
+    if n_loss: print(f"разрывов связи: {n_loss}")
+    n_art = int((df.groupby("trip").size()<5).sum())
+    if n_art: print(f"мелких фрагментов (<5 строк): {n_art}")
+    for tid, grp in df.groupby("trip"):
+        if len(grp) < 5: continue
+        t_a, t_b = grp["ts"].iloc[0], grp["ts"].iloc[-1]
+        dur = (t_b-t_a).total_seconds()/60
+        spd = grp["Speed"].fillna(0).values
+        dts = np.append(np.diff(grp["ts"].values)/np.timedelta64(1,"s"), 0.0)
+        km = (spd*dts/3600).sum()
+        vmax = grp["Speed"].fillna(0).max()
+        cl = grp["Coolant"].dropna()
+        c0, c1 = (cl.iloc[0], cl.iloc[-1]) if len(cl) else (np.nan, np.nan)
+        stops = int(((spd[1:]==0)&(spd[:-1]>0)).sum())
+        prof = grp["mode"].value_counts()*100/len(grp)
+        profs = ", ".join(f"{k} {v:.0f}%" for k,v in prof.sort_values(ascending=False).items() if v>=4)
+        print(f"Поездка: {t_a.strftime('%H:%M:%S')}-{t_b.strftime('%H:%M:%S')}  {dur:.1f} мин, {km:.1f} км, "
+              f"макс {vmax:.0f} км/ч, ОЖ {c0:.0f}-{c1:.0f} C, остановок {stops} [{ends.get(tid,'EOF')}]")
+        if profs: print(f"    профиль: {profs}")
 
-
-def running_mask(df):
-    inj = df[['Inj.1Time', 'Inj.2Time', 'Inj.3Time', 'Inj.4Time']].fillna(0).max(axis=1)
-    heat = df[['UpO2Heat', 'DownO2Heat']].fillna(0).max(axis=1)
-    return ((inj > 0) | (heat > 0)) & ~phantom_mask(df)
-
-
-def pause_types(df):
-    """Разрыв записи = dt > 60 с. SHUTDOWN: по обе стороны Speed=0 и
-    Gear P/N (портрет глушения). Иначе LINK_LOSS — поездка не рвётся."""
-    dt = df['ts'].diff().dt.total_seconds()
-    out = []
-    for i in np.where(dt > 60)[0]:
-        prev, nxt = i - 1, i
-        sp = (df['Speed'].iloc[prev] == 0) and (df['Speed'].iloc[nxt] == 0)
-        gr = str(df['Gear'].iloc[prev]).strip().upper() in ('P', 'N') and \
-             str(df['Gear'].iloc[nxt]).strip().upper() in ('P', 'N')
-        out.append((int(i), 'SHUTDOWN' if (sp and gr) else 'LINK_LOSS'))
-    return out
-
-
-def segment(df, run_col):
-    """Поездки рвутся ТОЛЬКО на SHUTDOWN-паузах. Сегменты — интервалы
-    между соседними SHUTDOWN. Хвост файла без глушения = поездка [EOF]
-    + виртуальный OFF-карман."""
-    df['dt_s'] = df['ts'].diff().dt.total_seconds().fillna(0)
-    gaps = dict(pause_types(df))
-    for i in gaps:                       # dt строки после паузы обнуляем
-        df.loc[i, 'dt_s'] = 0.0          # (иначе пауза прилипает к первой строке)
-    shutdowns = sorted(i for i, t in gaps.items() if t == 'SHUTDOWN')
-    bounds = [0] + shutdowns + [len(df)]
-    running = df[run_col]
-    trips = []
-    for k in range(len(bounds) - 1):
-        s = bounds[k] + (1 if k > 0 else 0)
-        e = bounds[k + 1] - 1 if k + 1 < len(bounds) - 1 else len(df) - 1
-        if e < s: continue
-        ridx = df.index[(df.index >= s) & (df.index <= e) & df[run_col]]
-        if len(ridx) == 0: continue      # стоянка с зажиганием — не поездка
-        kind = 'SHUTDOWN' if k < len(bounds) - 2 else 'EOF'
-        trips.append((ridx[0], ridx[-1], kind))
-    return trips, running
-
-
-def classify_modes(df, run_col):
-    rev, spd = df['Revs'].fillna(0), df['Speed'].fillna(0)
-    thr, ped = df['ThrottleAngle'].fillna(0), df['AccelPedalPos'].fillna(0)
-    cool = df['Coolant'].fillna(99)
-    run = df[run_col]
-    mode = pd.Series('OTHER', index=df.index)
-    mode[~run] = 'OFF'
-    m = run & (rev >= 200) & (rev <= 900) & (spd == 0) & (thr >= 30)
-    mode[m & (mode == 'OTHER')] = 'CRANK'
-    m = run & (cool < 60)
-    mode[m & (mode == 'OTHER')] = 'WARMUP'
-    m = run & (spd == 0) & (ped <= 6) & rev.between(650, 950) & cool.between(60, 75)
-    mode[m & (mode == 'OTHER')] = 'IDLE_COLD'
-    m = run & (spd == 0) & (ped <= 6) & rev.between(650, 950) & (cool >= 75)
-    mode[m & (mode == 'OTHER')] = 'IDLE_WARM'
-    m = run & (ped >= 85)
-    mode[m & (mode == 'OTHER')] = 'FULL_LOAD'
-    m = run & (rev >= 1500) & (thr >= 20)
-    mode[m & (mode == 'OTHER')] = 'LOAD'
-    m = run & (thr >= 8)
-    mode[m & (mode == 'OTHER')] = 'PART_LOAD'
-    m = run & (spd >= 20) & (ped <= 2) & (rev > 1200)
-    mode[m & (mode == 'OTHER')] = 'COAST'
-    m = run & (spd >= 30) & (ped < 5)
-    mode[m & (mode == 'OTHER')] = 'CRUISE'
-    m = run & (spd > 0)
-    mode[m & (mode == 'OTHER')] = 'DRIVE_LOW'
-    df['STABLE'] = (df['Revs'].diff().abs() <= 30).fillna(False) & run
-    df['ARMED'] = df['KnockSensorThr'].fillna(0) > 0
-    df['mode'] = mode
+def process_file(path):
+    df = load(path)
+    df = classify(df)
+    df, ends = segment(df)
+    report(df, ends, path)
     return df
 
-
-def trip_descriptors(df, trips):
-    out = []
-    for n, (s, e, kind) in enumerate(trips, 1):
-        seg = df.loc[s:e]
-        dtc = seg['dt_s'].clip(upper=120)      # защита от stray-гэпов
-        dur = dtc.sum() / 60
-        dist = (seg['Speed'] * dtc).sum() / 3600
-        stops = int(((seg['Speed'] > 0).astype(int).diff().fillna(0) == -1).sum())
-        vc = seg['mode'].value_counts(normalize=True) * 100
-        prof = ', '.join(f'{m} {p:.0f}%' for m, p in vc.items() if p >= 3)
-        out.append(dict(n=n, t0=seg['ts'].iloc[0], t1=seg['ts'].iloc[-1],
-                        dur=dur, dist=dist, vmax=seg['Speed'].max(),
-                        cool0=seg['Coolant'].iloc[0], cool1=seg['Coolant'].iloc[-1],
-                        stops=stops, kind=kind, prof=prof))
-    return out
-
-
-def fmt_t(ts): return ts.strftime('%H:%M:%S')
-
-
-def report_file(path):
-    df = load_csv(path)
-    df = mark_glitches(df)
-    df['running'] = running_mask(df)
-    trips, _ = segment(df, 'running')
-    df = classify_modes(df, 'running')
-    descs = trip_descriptors(df, trips)
-    span = (df['ts'].iloc[-1] - df['ts'].iloc[0]).total_seconds() / 60
-    rec = df['dt_s'].clip(upper=120).sum() / 60
-    n_link = sum(1 for _, t in pause_types(df) if t == 'LINK_LOSS')
-    print(f'\n=== {os.path.basename(path)}: {df["ts"].iloc[0]} — {df["ts"].iloc[-1]} ===')
-    print(f'Строк {len(df)}; записи {rec:.1f} мин, паузы {span - rec:.1f} мин '
-          f'(разрывов связи: {n_link}); баланс {rec + (span - rec):.1f} мин')
-    for d in descs:
-        print(f'Поездка {d["n"]}: {fmt_t(d["t0"])}–{fmt_t(d["t1"])}  '
-              f'{d["dur"]:.1f} мин, {d["dist"]:.1f} км, макс {d["vmax"]:.0f} км/ч, '
-              f'ОЖ {d["cool0"]:.0f}→{d["cool1"]:.0f}°C, остановок {d["stops"]} [{d["kind"]}]')
-        print(f'    профиль: {d["prof"]}')
-    return df, descs
-
-
-def main(folder='.'):
-    files = sorted(glob.glob(os.path.join(folder, 'MED17*.csv')))
+def main():
+    folder = sys.argv[1] if len(sys.argv)>1 else os.path.dirname(os.path.abspath(__file__))
+    files = sorted(glob.glob(os.path.join(folder, "MED17*.csv")))
     if not files:
-        print('MED17*.csv не найдены в', folder); return
-    for f in files:
-        try:
-            report_file(f)
-        except Exception as ex:
-            print(f'ОШИБКА {f}: {ex}')
+        print(f"MED17-файлы в {folder} не найдены"); return
+    print(f"Найдено файлов: {len(files)}")
+    for p in files:
+        process_file(p)
 
-
-if __name__ == '__main__':
-    main(sys.argv[1] if len(sys.argv) > 1 else '.')
+if __name__ == "__main__":
+    main()
