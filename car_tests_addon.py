@@ -6,6 +6,16 @@
 import numpy as np
 import pandas as pd
 
+BASE = os.path.dirname(os.path.abspath(__file__))
+RAW_DIR = os.path.join(BASE, "raw")
+
+def find_csvs():
+    files = sorted(glob.glob(os.path.join(RAW_DIR, "MED17*.csv")))
+    if not files:
+        print(f"CSV-файлы MED17_4_2_YYYYMMDD.csv не найдены в папке {RAW_DIR}")
+        print("Создайте папку raw рядом со скриптом и скопируйте логи туда.")
+    return files
+
 INJ_COLS = ['Inj.1Time', 'Inj.2Time', 'Inj.3Time', 'Inj.4Time']
 
 def _num(df, col):

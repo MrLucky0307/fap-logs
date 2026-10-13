@@ -16,6 +16,18 @@ v4.2: режим IGN (зажигание вкл / двигатель заглу�
       поездки короче 30 с не печатаются; части -1/-2 пропускаются при слитом файле.
 """
 import sys, os, glob
+from car_common import find_csvs
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+RAW_DIR = os.path.join(BASE, "raw")
+
+def find_csvs():
+    files = sorted(glob.glob(os.path.join(RAW_DIR, "MED17*.csv")))
+    if not files:
+        print(f"CSV-файлы MED17_4_2_YYYYMMDD.csv не найдены в папке {RAW_DIR}")
+        print("Создайте папку raw рядом со скриптом и скопируйте логи туда.")
+    return files
+
 import numpy as np
 import pandas as pd
 
@@ -33,6 +45,7 @@ PAUSE_FORCE = 600     # пауза дольше 10 мин — глушение �
 COOL_DROP   = 10      # падение ОЖ за паузу, C — признак глушения
 IGN_GAP = 120         # макс разрыв между строками, чтобы продолжить IGN-стретч
 IGN_MIN = 10          # мин длительность IGN-стретча, чтобы рвать поездку
+
 
 
 def load(path):

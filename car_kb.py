@@ -21,6 +21,17 @@ import re
 import shutil
 import sys
 from datetime import datetime
+from car_common import find_csvs
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+RAW_DIR = os.path.join(BASE, "raw")
+
+def find_csvs():
+    files = sorted(glob.glob(os.path.join(RAW_DIR, "MED17*.csv")))
+    if not files:
+        print(f"CSV-файлы MED17_4_2_YYYYMMDD.csv не найдены в папке {RAW_DIR}")
+        print("Создайте папку raw рядом со скриптом и скопируйте логи туда.")
+    return files
 
 KB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "car_kb.json")
 

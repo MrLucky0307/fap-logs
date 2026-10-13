@@ -39,6 +39,16 @@ import statistics
 import sys
 from datetime import datetime
 
+BASE = os.path.dirname(os.path.abspath(__file__))
+RAW_DIR = os.path.join(BASE, "raw")
+
+def find_csvs():
+    files = sorted(glob.glob(os.path.join(RAW_DIR, "MED17*.csv")))
+    if not files:
+        print(f"CSV-файлы MED17_4_2_YYYYMMDD.csv не найдены в папке {RAW_DIR}")
+        print("Создайте папку raw рядом со скриптом и скопируйте логи туда.")
+    return files
+
 SEPS = [";", ",", "\t"]
 OUT_FILE = "отчёт_logscan.txt"
 SEP_LINE = "=" * 72

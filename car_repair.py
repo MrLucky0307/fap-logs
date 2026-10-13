@@ -1,6 +1,16 @@
 # car_repair.py — спасение базы знаний из сломанного car_kb.json
 import json, re
 
+BASE = os.path.dirname(os.path.abspath(__file__))
+RAW_DIR = os.path.join(BASE, "raw")
+
+def find_csvs():
+    files = sorted(glob.glob(os.path.join(RAW_DIR, "MED17*.csv")))
+    if not files:
+        print(f"CSV-файлы MED17_4_2_YYYYMMDD.csv не найдены в папке {RAW_DIR}")
+        print("Создайте папку raw рядом со скриптом и скопируйте логи туда.")
+    return files
+
 DST = "car_kb.json"
 CANDS = ["car_kb.broken.json", "car_kb.json"]
 

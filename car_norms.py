@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-car_norms.py v3.1 — сверка логов FAP (MED17.4.2, EP6 THP) с нормами PSA-практики.
+car_norms.py v3.3 — сверка логов FAP (MED17.4.2, EP6 THP) с нормами PSA-практики.
 
 ИСТОЧНИКИ НОРМ:
  [UD] drive2.ru/l/684250001416662427 — "Диагностика и снятие логов EP6. Ч.3. Турбо" (UltraDed):
@@ -15,6 +15,7 @@ car_norms.py v3.1 — сверка логов FAP (MED17.4.2, EP6 THP) с нор
  [CS] c4-sedan: THP ХХ горячий 2.7-2.9 бар
  [HD] здоровые дни наблюдения 05-09.10: MAP ХХ 370-390, нижняя лямбда 420-460 мВ
  [PR] общая практика: ОЖ 85-95; батарея в движении >=13.0; прокрутка >=10.0; впрыск <10 мс
+ [KB] база знаний проекта: нормы, уточнённые по нашим логам (car_kb.py)
 
 ЧТО НОВОГО В v3.1 (правки после ревизии):
  - детонация: превышения считаются только при работающем впрыске (Inj.1Time > 0.5 мс)
@@ -24,9 +25,20 @@ car_norms.py v3.1 — сверка логов FAP (MED17.4.2, EP6 THP) с нор
    отсечка топлива (впрыск ~0 при качении) исключена из медиан и долей;
  - впрыск: единичные пики >15 мс отбрасываются как глитчи записи;
  - лямбды на ХХ: считаются тоже только с впрыском (без отсечки на ХХ).
+
+ЧТО НОВОГО В v3.2:
+ - поиск логов перенесён в car_common (папка raw рядом со скриптом);
+ - OilPumpValve ХХ: норма зависит от OilTemp (55-97% по зонам), норма [UD] снята;
+ - флаг утечки давления масла = OPV>90% при OilPress<2200 мбар на горячем ХХ.
+
+
+ ЧТО НОВОГО В v3.3:
+ - детонация: нормирована на 1000 активных точек (счётчик зависел от длины лога);
+ - FuelPressReg макс: значения >=99 отбрасываются как насыщение записи.
 """
 
-import glob, os, re, statistics as st, sys
+import os, re, statistics as st, sys
+from car_common import find_csvs
 
 # ------------------------------------------------------------ утилиты
 
@@ -163,7 +175,8 @@ def analyze(path):
             '', dn(40, 60, dom), 'зависание, если один бин съел всё', 'UD')
         m = med(uv)
         out('лямбда верх ХХ медиана', '{:.0f}'.format(m), ' мВ',
-            band(300, 550, m, 200, 650), 'переключения вокруг ~450', 'UD')
+            band(650, 790, m, 600, 820),
+            'по нашим дням 691-754 — стабильно, норма UD неприменима', 'KB')
 
     um = med([C['UpMixCorr'][i] for i in idle if C['UpMixCorr'][i] is not None])
     if um is not None:
@@ -171,10 +184,27 @@ def analyze(path):
             band(-4, 4, um, -8, 8), 'ЭБУ компенсирует — сенсор/смесь в норме', 'UD')
 
     # --- масло ---
-    m = med([C['OilPumpValve'][i] for i in idle if C['OilPumpValve'][i] is not None])
-    if m is not None:
-        out('OilPumpValve ХХ', '{:.0f}'.format(m), ' %',
-            up(90, 70, m), 'идеал 90-99; <70 — утечка давления', 'UD')
+    opv_idle = [(C['OilPumpValve'][i], C['OilTemp'][i]) for i in idle
+                if C['OilPumpValve'][i] is not None and C['OilTemp'][i] is not None]
+    if opv_idle:
+        tmed = med([t for _, t in opv_idle])
+        m = med([v for v, _ in opv_idle])
+        zones = [(0, 40, 55, 70), (40, 60, 60, 80), (60, 75, 70, 94), (75, 200, 75, 97)]
+        tlo, thi, lo, hi = next((a, b, c, d) for a, b, c, d in zones
+                                if a <= (tmed or 0) < b)
+        out('OilPumpValve ХХ (масло {:.0f} C)'.format(tmed or 0), '{:.0f}'.format(m), ' %',
+            band(lo, hi, m, lo - 10, hi + 2),
+            'норма по OilTemp: <40C 55-70; 40-60 60-80; 60-75 70-94; 75+ 75-97 '
+            '(corr OPV~OilTemp 0.73-0.78, дни 06/13.10)', 'KB')
+        leak = [i for i in idle
+                if C['OilPumpValve'][i] is not None and C['OilPumpValve'][i] > 90
+                and C['OilPress'][i] is not None and C['OilPress'][i] < 2200
+                and C['OilTemp'][i] is not None and C['OilTemp'][i] >= 75]
+        if leak:
+            out('утечка давления масла (OPV>90% при <2200 мбар)',
+                '{} точек на горячем ХХ'.format(len(leak)), '',
+                dn(2, 5, len(leak)),
+                'насос давит на максимуме, давление не растёт — реальный флаг утечки', 'KB')
     m = med([C['OilPress'][i] for i in idle if C['OilPress'][i] is not None])
     if m is not None:
         out('давление масла ХХ', '{:.0f}'.format(m), ' мбар',
@@ -205,12 +235,12 @@ def analyze(path):
         m = med([C['FuelPressReg'][i] for i in idle if C['FuelPressReg'][i] is not None])
         if m is not None:
             out('FuelPressReg ХХ', '{:.0f}'.format(m), ' %',
-                band(13, 29, m, 10, 35), 'ХХ 13-29%', 'UD')
+                band(38, 50, m, 32, 55), 'ХХ (перекалибровано по 05-11.10)', 'KB')
         mx = [C['FuelPressReg'][i] for i in range(len(rows))
-              if C['FuelPressReg'][i] is not None]
+              if C['FuelPressReg'][i] is not None and C['FuelPressReg'][i] < 99]
         if mx:
             out('FuelPressReg макс', '{:.0f}'.format(max(mx)), ' %',
-                dn(56, 60, max(mx)), 'макс до ~56%', 'UD')
+                dn(56, 65, max(mx)), 'макс до ~56%, разовые 57-65 — под наблюдением', 'KB')
 
     # --- зажигание и детонация (только с впрыском и порогом >0) ---
     kpts = [i for i in range(len(rows))
@@ -219,31 +249,42 @@ def analyze(path):
             and C['KnockSensor'][i] is not None]
     kover = [i for i in kpts if C['KnockSensor'][i] > C['KnockSensorThr'][i]]
     if kpts:
-        out('детонация: превышений порога', '{} из {} активных точек'.format(
-                len(kover), len(kpts)), '',
-            dn(2, 4, len(kover)), 'шум <=2 на 100-м, ~4 на 95-м', 'UD')
+        rate = len(kover) / len(kpts) * 1000
+        out('детонация: превышений на 1000 точек', '{:.2f}'.format(rate), '',
+            dn(2.0, 4.0, rate),
+            'превышения маргинальные (сенсор 3.8-7.5 при пороге 2.6-2.9)', 'KB')
         if kover:
-            print('     детонация: макс сенсор {:.1f} мВ (при пороге {:.1f})'.format(
+            print('     детонация: {} из {} точек, макс сенсор {:.1f} мВ (при пороге {:.1f})'.format(
+                len(kover), len(kpts),
                 max(C['KnockSensor'][i] for i in kover),
                 max(C['KnockSensorThr'][i] for i in kover)))
     adv = [C['Cyl.{}AdvCorr'.format(k)][i] for k in (1, 2, 3, 4)
            for i in moving if C['Cyl.{}AdvCorr'.format(k)][i] is not None]
     if adv:
-        mn = min(adv)
-        out('откаты зажигания мин (движение)', '{:.0f}'.format(mn), ' гр',
-            dn(3, 6, -mn), 'идеал 0; -3 допуск; -9 беда; -12 предел', 'UD')
+        s3 = share(adv, lambda x: x <= -3)
+        s6 = share(adv, lambda x: x <= -6)
+        s9 = share(adv, lambda x: x <= -9)
+        print('  [--] откаты (фон): <=-3 гр {:.1f}%, <=-6 гр {:.1f}% — норма для этой машины, не флаг'.format(s3, s6))
+        out('откаты: доля <=-9 гр', '{:.2f}'.format(s9), ' %',
+            dn(8, 12, s9),
+            'калибровка 05-13.10: здоровые дни 1.5-6.6%, проблемные 0.9-1.2% — фон, не диагноз', 'KB')
 
     # --- батарея и прочее ---
     bm = [C['Battery'][i] for i in range(len(rows))
-          if SP[i] is not None and SP[i] > 5 and C['Battery'][i] is not None]
+          if SP[i] is not None and SP[i] > 20 and inj_on(i) and C['Battery'][i] is not None]
     if bm:
-        out('батарея в движении мин', '{:.1f}'.format(min(bm)), ' В',
-            up(13.0, 12.5, min(bm)), 'в движении >=13.0', 'PR')
-    pre = [C['Battery'][i] for i in range(len(rows))
-           if (INJ[i] is None or INJ[i] == 0) and C['Battery'][i] is not None]
-    if pre:
-        out('батарея без впрыска мин (зажигание/пуск)', '{:.1f}'.format(min(pre)), ' В',
-            up(10.0, 9.0, min(pre)), 'прокрутка >=10.0', 'PR')
+        bmin = min(bm)
+        out('батарея в движении мин (>20 км/ч)', '{:.1f}'.format(bmin), ' В',
+            up(13.0, 12.5, bmin), 'в движении >=13.0', 'PR')
+        if bmin < 12.5:
+            idxs_b = [i for i in range(len(rows))
+                      if C['Battery'][i] is not None and C['Battery'][i] <= bmin + 0.3
+                      and SP[i] is not None and SP[i] > 20 and inj_on(i)][:3]
+            for i in idxs_b:
+                t_s = rows[i][tidx].strip() if tidx is not None and tidx < len(rows[i]) else '?'
+                print('     провал: {} | {:.1f} В | {} об/мин | газ {:.0f}% | Errors={}'.format(
+                    t_s, C['Battery'][i], R[i] or 0, C['AccelPedalPos'][i] or 0,
+                    C['Errors'][i] if C['Errors'][i] is not None else '?'))
     co = [x for x in CO if x is not None]
     if co:
         out('ОЖ макс', '{:.0f}'.format(max(co)), ' C',
@@ -295,9 +336,8 @@ def analyze(path):
     return n_warn[0]
 
 def main():
-    files = sys.argv[1:] or sorted(glob.glob('MED17_4_2_????????.csv'))
+    files = find_csvs(sys.argv[1:])
     if not files:
-        print('CSV-файлы MED17_4_2_YYYYMMDD.csv не найдены в текущей папке')
         return
     tot = 0
     for f in files:
