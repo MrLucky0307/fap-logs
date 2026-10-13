@@ -136,7 +136,7 @@ def process_file(path):
     return df
 
 def main():
-    folder = sys.argv[1] if len(sys.argv)>1 else os.path.dirname(os.path.abspath(__file__))
+    folder = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), "raw")
     files = sorted(glob.glob(os.path.join(folder, "MED17*.csv")))
     if not files:
         print(f"MED17-файлы в {folder} не найдены"); return
