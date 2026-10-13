@@ -67,12 +67,12 @@ def classify(df):
     idle_warm = run & ~crank & ~warm & (cool>=75)&(spd==0)&(thr<=8)&(revs>=650)&(revs<=1200)
     mode[idle_warm] = "IDLE_WARM"
     mode[run & ~crank & (spd==0) & ~(warm|idle_cold|idle_warm)] = "OTHER"
-    mode[run & (ped>=85)] = "FULL_LOAD"
     coast = run & (spd>0)&(thr<8)&(revs>1200)
     mode[coast] = "COAST"
     mode[run & (spd>0)&(thr<8)&(revs<=1200) & ~coast] = "DRIVE_LOW"
-    mode[run & (thr>=20)] = "LOAD"
     mode[run & (thr>=8)&(thr<20) & (spd>0)] = "PART_LOAD"
+    mode[run & (thr>=20)] = "LOAD"
+    mode[run & (ped>=85)] = "FULL_LOAD"   # последним: приоритет над LOAD/PART_LOAD
     df["mode"] = mode
     df["stable"] = pd.Series(revs).diff().abs().values <= 30
     return df
