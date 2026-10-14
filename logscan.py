@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-logscan.py v2.2 — анализ CSV-логов FAP (MED17.4.2).
+logscan.py v2.3 — анализ CSV-логов FAP (MED17.4.2).
 
 Запуск:
   python logscan.py                      — все MED17*.csv из текущей папки
@@ -30,6 +30,15 @@ logscan.py v2.2 — анализ CSV-логов FAP (MED17.4.2).
   - даты формата 2026.10.12 парсятся — многодневная сортировка работает;
   - время через полночь печатается как "+1д ЧЧ:ММ:СС";
   - нижняя лямбда отдельно на прогретом ХХ (ОЖ >= 70 °C).
+
+Что нового в v2.3 относительно v2.2:
+  - поиск логов переведён на car_common-стиль: по умолчанию raw рядом со скриптом,
+    явные пути из командной строки тоже принимаются (имя файла ищется в raw);
+
+Что нового в v2.4 относительно v2.3:
+  - флаг --per-day: отчёт на каждый файл пишется отдельно как
+    отчёт_YYYYMMDD.txt (дата берётся из имени лога), плюс общий отчёт_logscan.txt;
+
 """
 
 import glob
@@ -597,25 +606,49 @@ def analyze(points, name, tag):
 
 def main():
     args = [a for a in sys.argv[1:] if a != "--no-sync"]
+    per_day = "--per-day" in args
+    args = [a for a in args if a != "--per-day"]
     if args:
-        files = args
+        # явные пути (или имена файлов) из командной строки
+        files = [a if os.path.isabs(a) or os.path.sep in a
+                 else os.path.join(RAW_DIR, a) for a in args]
+        files = [f for f in files if os.path.isfile(f)]
+        if not files:
+            print("Указанные файлы не найдены: {}".format(", ".join(args)))
+            return
     else:
-        files = sorted(glob.glob("MED17*.csv")) or sorted(glob.glob("*.csv"))
-    if not files:
-        print("CSV-файлы не найдены.")
-        return
-    out_all = []
-    for path in files:
+        files = find_csvs()
+        if not files:
+            return   # find_csvs уже напечатал, где искал
+
+    def block(path):
         points, tag, header = load_csv(path)
-        out_all.append(SEP_LINE)
-        out_all.append("Файл: {}{}".format(
+        b = [SEP_LINE]
+        b.append("Файл: {}{}".format(
             os.path.basename(path), "  [{}]".format(tag) if tag else ""))
-        out_all.extend(analyze(points, path, tag))
-    out_all.append("")
-    text = "\n".join(out_all)
-    with open(OUT_FILE, "w", encoding="utf-8") as f:
-        f.write(text)
-    print(text)
+        b.extend(analyze(points, path, tag))
+        return "\n".join(b)
+
+    if per_day:
+        for path in files:
+            text = block(path)
+            m = re.search(r"(\d{8})", os.path.basename(path))
+            name = "отчёт_{}.txt".format(m.group(1)) if m else \
+                "отчёт_{}.txt".format(os.path.splitext(os.path.basename(path))[0])
+            out_path = os.path.join(BASE, name)
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(text + "\n")
+            print(text)
+        # общий сводный отчёт тоже обновим
+        out_all = [block(p) for p in files]
+        text = "\n".join(out_all)
+        with open(OUT_FILE, "w", encoding="utf-8") as f:
+            f.write(text + "\n")
+    else:
+        text = "\n".join(block(p) for p in files)
+        with open(OUT_FILE, "w", encoding="utf-8") as f:
+            f.write(text + "\n")
+        print(text)
     sync_to_kb(OUT_FILE)
 
 
